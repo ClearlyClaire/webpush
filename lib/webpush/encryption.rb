@@ -7,6 +7,9 @@ module Webpush
     # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
     def encrypt(message, p256dh, auth)
       assert_arguments(message, p256dh, auth)
+      # Following RFC8291, messages can't be longer than 3993 bytes long
+      # so encrypted message do not exceed 4096 bytes
+      raise ArgumentError, "message is too big" if message.bytesize > 3993
 
       group_name = 'prime256v1'
       salt = Random.new.bytes(16)
@@ -33,10 +36,15 @@ module Webpush
       nonce = HKDF.new(prk, salt: salt, info: nonce_info).next_bytes(12)
 
       ciphertext = encrypt_payload(message, content_encryption_key, nonce)
+      # This should never happen if message length <= 3993
+      raise ArgumentError, "encrypted payload is too big" if ciphertext.bytesize > 4096
 
       serverkey16bn = convert16bit(server_public_key_bn)
-      rs = ciphertext.bytesize
-      raise ArgumentError, "encrypted payload is too big" if rs > 4096
+      # According to RFC8188, the final record can be smaller than the record size
+      # RFC8291 requires encrypted messages to be at most 4096. And the example set the
+      # RS to 4096. RS can be smaller to 4096 but hardcoding is also following the specs.
+      # We set RS=4096 to allow testing with the RFC example.
+      rs = 4096
 
       aes128gcmheader = "#{salt}" + [rs].pack('N*') + [serverkey16bn.bytesize].pack('C*') + serverkey16bn
 
@@ -47,13 +55,14 @@ module Webpush
     private
 
     def encrypt_payload(plaintext, content_encryption_key, nonce)
+      # RFC8291 requires the padding delimiter to be 0x02
+      plaintext = plaintext + "\x02"
       cipher = OpenSSL::Cipher.new('aes-128-gcm')
       cipher.encrypt
       cipher.key = content_encryption_key
       cipher.iv = nonce
       text = cipher.update(plaintext)
-      padding = cipher.update("\2\0")
-      e_text = text + padding + cipher.final
+      e_text = text + cipher.final
       e_tag = cipher.auth_tag
 
       e_text + e_tag
